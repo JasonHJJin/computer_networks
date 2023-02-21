@@ -1,0 +1,191 @@
+#!/usr/bin/env python3.10
+
+import sys
+import socket
+import select
+import time
+import argparse
+import re
+import math
+
+
+class ForwardBrowser:
+    def __init__(self):
+        self.fbsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    def start(self, host, port):
+        try:
+            self.fbsock.bind((args.fakeip, 0))
+            self.fbsock.connect((host, port))
+            return self.fbsock
+        except Exception:
+            return False
+
+
+class ServProcess:
+    def __init__(self, host, port):
+        self.serverList = []
+        self.channel = {}
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
+        # reuse local addr, port
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server.bind((host, port))
+        self.server.listen(100)
+
+    def operation(self):
+        self.serverList.append(self.server)
+        self.tput = 1000  # set minimum as mentioned using
+        self.avgtPut = 1500
+        self.bitrate = 1000
+        self.duration = 1
+        self.chunkname = None
+        contentlen = None
+        startTime = None  # cannot be 0.0
+        endTime = None
+
+        while True:
+            readList, writeList, exceptionList = select.select(
+                self.serverList, [], [])
+            for self.ind in readList:
+                if self.ind == self.server:
+                    self.createConn()
+                    break
+                # if destination address to which socket is connected
+                if (self.ind.getpeername()[0] == args.serverip):
+                    self.data = self.ind.recv(4096)
+                    endTime = time.time()
+                    # reading in mp4 file
+                    if bytes('Content-Type: video/mp4', 'utf-8') in self.data:
+                        contentlen = parse_content(self.data)
+                        self.duration = (endTime - startTime)*1000
+                        self.tput = (contentlen * 8 / 1024) / \
+                            (self.duration/1000)
+                        self.avgtPut = float(
+                            args.alpha) * self.tput + (1-float(args.alpha)) * self.avgtPut
+                        self.bitrate = selectBitRate(
+                            self.avgtPut, self.bitrate)
+                        with open(args.logfile, 'w') as f:
+                            f.write('%.7f %f %f %f %d %s %s\n' % (time.time(
+                            ), self.duration, self.tput, self.avgtPut, self.bitrate, args.serverip, self.chunkname))
+                else:
+                    self.data = self.ind.recv(4096)
+                    # GET request
+                    if (b"GET" in self.data):
+                        startTime = time.time()
+
+                # Disconnected
+                if len(self.data) == 0:
+                    die = self.channel[self.ind]
+                    self.serverList.remove(self.ind)
+                    self.severList.remove(die)
+                    self.channel[die].close()
+                    die.close()
+                    del self.channel[die]
+                    del die
+                    break
+                else:
+                    if (self.ind.getpeername()[0] == args.serverip):
+                        if b'BigBuckBunny_6s.mpd' in self.data:
+                            self.data = self.data.replace(
+                                b'BigBuckBunny_6s.mpd', b'BigBuckBunny_6s_nolist.mpd')
+                        self.channel[self.ind].send(self.data)
+                        pass
+                    else:
+                        if (b"GET" in self.data):
+                            tar = self.data.split()
+                            p = re.compile(
+                                b'/bunny_\d+bps/BigBuckBunny_6s\d+.m4s')
+                            if (p.match(tar[1])):
+                                temp = tar[1]
+                                self.chunkname = choosechunk(
+                                    self.bitrate, tar[1])
+                                self.data.replace(tar[1], self.chunkname)
+                                with open(args.logfile, 'a') as f:
+                                    f.write('%.7f %f %f %f %d %s %s\n' % (time.time(
+                                    ), self.duration, self.tput, self.avgtPut, self.bitrate, args.serverip, self.chunkname))
+                                print(self.chunkname)
+                        self.channel[self.ind].send(self.data)
+
+    def createConn(self):
+        fbsock = ForwardBrowser().start(args.serverip, 8080)
+        clientsock, clientaddr = self.server.accept()
+        if fbsock:
+            print("Connection from " + clientaddr[0] + "\n")
+            self.serverList.append(clientsock)
+            self.serverList.append(fbsock)
+            # Adding to dictionary--
+            self.channel[fbsock] = clientsock
+            self.channel[clientsock] = fbsock
+        else:
+            clientsock.close()
+
+
+def choosechunk(bitrate, url):
+    bitrate = bitrate*1024
+    bitrate = int(math.floor(bitrate))
+    s = url.split(b'_')
+    s = s[0] + b"_" + bytes(str(bitrate), 'utf-8') + \
+        b"bps/BigBuckBunny_6s" + s[2][s[2].find(b'6s')+len(b'6s'):]
+    return s
+
+
+def selectBitRate(avgtPut, bitrate):
+    '''
+    ind = str(data).find("bandwidth=")
+    print(ind)
+    print("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    print(avgtPut)
+    '''
+    # Choice of events switching back and forth
+    avgtPut = avgtPut*8/1000
+    if (avgtPut >= 1.5*bitrate):
+        return avgtPut
+    elif (avgtPut >= 1.5*500):
+        return avgtPut/2
+    elif (avgtPut >= 1.5*250):
+        return avgtPut*2
+    else:
+        return avgtPut
+
+
+def parse_content(data):
+    '''
+    print(str(data).split('\n'))
+    print("---------------")
+    print(str(data).split('\n')[0])
+    print(str(data).split('\n')[1])
+    print("-----------------------------------")
+    '''
+    # Checking the index of content-length
+    ind = str(data).split('\n')[0].find("Content-Length: ")
+    ind = ind+16
+    first_ind = ind
+    count = ""
+    for ind in range(ind, ind+5, 1):
+        if (str(data).split('\n')[0][ind].isnumeric()):
+            continue
+        else:
+            break
+    numb = int(str(data).split('\n')[0][first_ind:ind])
+    content = float(numb)
+    return content
+
+
+def main():
+    main_server = ServProcess('', int(args.port))
+    try:
+        main_server.operation()
+    except KeyboardInterrupt:
+        print("KeyboardInterrupt")
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Launch a proxy.')
+    parser.add_argument('logfile', help='name of the logfile')
+    parser.add_argument('alpha', help='alpha')
+    parser.add_argument('port', help='Listening port')
+    parser.add_argument('fakeip', help='Fake ip for proxy')
+    parser.add_argument('serverip', help='server ip')
+    args = parser.parse_args()
+    main()
